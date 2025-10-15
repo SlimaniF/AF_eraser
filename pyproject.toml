@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AF_eraser"
+version = "0.1.0"
+dependencies = [
+    "numpy",
+    "scipy"
+]
