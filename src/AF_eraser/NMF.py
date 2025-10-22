@@ -73,10 +73,6 @@ def remove_autofluorescence_NMF(
     else :
         raise TypeError("Wrong type for exposure time. Expected int or list got {}".format(type(exposure_time)))
     
-    import bigfish.stack as stack
-    PATH = "/home/floric/Documents/fish_images/AF_eraser/Data_Carolina/"
-
-    
 
     matrix_dict = _initialize_matrix(
         images,
@@ -99,7 +95,6 @@ def remove_autofluorescence_NMF(
         decomposed_signal_matrix=matrix_dict['decomposed_signal_matrix'],
         shape=shape
     )
-        stack.save_image(signal, PATH + "/signal{}.tif".format(iter))
         print("iter : ", iter)
         sigma = sigmas[iter]
         iter +=1
