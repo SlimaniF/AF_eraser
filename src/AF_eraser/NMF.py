@@ -11,13 +11,13 @@ D = dark_current_matrix
 """
 
 from typing import TypedDict, cast
+from tqdm import tqdm
 import numpy as np
+from numpy.linalg import pinv
 from scipy.optimize import nnls
 from scipy.ndimage import gaussian_filter 
-from scipy.linalg import norm
+from scipy.linalg import decomp, norm
 from sklearn.decomposition import NMF
-
-#TODO : change list comprehension to pre-allocate + for loop. Should not impact performance since nnls is already a C function.
 
 class matrix_dict(TypedDict) :
     decomposed_signal_matrix : np.ndarray
@@ -73,6 +73,9 @@ def remove_autofluorescence_NMF(
     else :
         raise TypeError("Wrong type for exposure time. Expected int or list got {}".format(type(exposure_time)))
     
+    import bigfish.stack as stack
+    PATH = "/home/floric/Documents/fish_images/AF_eraser/Data_Carolina/"
+
     
 
     matrix_dict = _initialize_matrix(
@@ -90,14 +93,19 @@ def remove_autofluorescence_NMF(
         'dark_current_matrix' : [],
         'linear_coef_matrix' : []
     }
+    print("shape : ", shape)
     while iter < max_iteration :
+        signal, autofluorescence = _extract_resulting_signals(
+        decomposed_signal_matrix=matrix_dict['decomposed_signal_matrix'],
+        shape=shape
+    )
+        stack.save_image(signal, PATH + "/signal{}.tif".format(iter))
+        print("iter : ", iter)
         sigma = sigmas[iter]
         iter +=1
 
         estimate_coef_dark = _estimate_coef_and_darkcurrent(
             Y=Y,
-            linear_coef_matrix= matrix_dict['linear_coef_matrix'],
-            dark_current_matrix= matrix_dict['dark_current_matrix'],
             target_matrix=matrix_dict['decomposed_signal_matrix']
         )
 
@@ -107,7 +115,7 @@ def remove_autofluorescence_NMF(
             dark_current_matrix=estimate_coef_dark['dark_current_matrix'],
         )
 
-        _apply_gaussian_filter_on_target_matrix(
+        estimate_factorized_signal = _apply_gaussian_filter_on_target_matrix(
             target_matrix=estimate_factorized_signal,
             gaussian_kernel=sigma,
             image_shape=shape,
@@ -128,6 +136,7 @@ def remove_autofluorescence_NMF(
 
         if has_converged : break
     
+    print("shape : ", shape)
     signal, autofluorescence = _extract_resulting_signals(
         decomposed_signal_matrix=matrix_dict['decomposed_signal_matrix'],
         shape=shape
@@ -155,17 +164,22 @@ def _initialize_matrix(
         observed_matrix,
     )
 
-    model = NMF(n_components=cast(str,2), init='nndsvda', max_iter=50)
-    decomposed_signal_matrix = model.fit_transform(Y)   # shape (m,2) ~ B
-    linear_coef_matrix = model.components_        # shape (2,n) ~ C
+    init_background = observed_matrix[1,:]
+    init_signal = images[0].flatten() - init_background
+    init_signal[init_signal < 0] = 0
+
+    init_background = init_background.astype(np.float32)
+    init_signal = init_signal.astype(np.float32)
+
+    decomposed_signal_matrix = np.array([init_signal, init_background], dtype=np.float32)
 
     #Init matrix D : Dark current
-    dark_current_matrix : np.ndarray = np.ones(shape=(images_number,1))
+    dark_current_matrix : np.ndarray = np.empty(shape=(images_number,1))
 
     res : matrix_dict = {
     'normalised_observed_matrix' : Y,
     'decomposed_signal_matrix' : decomposed_signal_matrix,
-    'linear_coef_matrix' : linear_coef_matrix,
+    'linear_coef_matrix' : np.empty(shape=(images_number,2)),
     'dark_current_matrix' : dark_current_matrix
     }
 
@@ -173,8 +187,6 @@ def _initialize_matrix(
 
 def _estimate_coef_and_darkcurrent(
     Y : np.ndarray,
-    linear_coef_matrix : np.ndarray,
-    dark_current_matrix : np.ndarray,
     target_matrix : np.ndarray
 ) :
     """
@@ -193,16 +205,11 @@ def _estimate_coef_and_darkcurrent(
     C = np.vstack(
         (target_matrix, np.ones(shape=(1,pixel_number), dtype=np.float32)),
         dtype=np.float32).T
-    
-    
-    nnls_estimate = [
-        nnls(A=C, b=Y[line,:])
-        for line in range(0, images_number)]
-    
-    x,residuals = zip(*nnls_estimate)
 
-    X = np.array(x, dtype=np.float32)
-
+    X = np.zeros(shape=(images_number,3), dtype=np.float32)
+    for line in tqdm(range(images_number), desc="B and D estimate") :
+        X[line,:],_ = nnls(A=C, b=Y[line,:])
+    
     estimate_coef_matrix, estimate_dark_current_matrix = X[:,:-1], X[:,-1]
 
     res = {
@@ -212,7 +219,7 @@ def _estimate_coef_and_darkcurrent(
 
     return res
 
-def _estimate_target_matrix(
+def _estimate_target_matrix_brut_nnls(
     Y : np.ndarray,
     linear_coef_matrix : np.ndarray,
     dark_current_matrix : np.ndarray,
@@ -223,18 +230,65 @@ def _estimate_target_matrix(
     """
     
     image_number, pixel_number = Y.shape
-    corrected_signal = Y-np.repeat(dark_current_matrix, Y.shape[1],axis=1)
+    corrected_signal = Y-dark_current_matrix[:,None]
 
-    nnls_estimate = [
-        nnls(A=linear_coef_matrix.T, b= corrected_signal[:,pixel])
-        for pixel in range(pixel_number)]
-    
-    x,residuals = zip(*nnls_estimate)
-    estimated_target_matrix = np.array(
-        x, dtype=np.float32
-    )
+    estimated_target_matrix = np.zeros(shape=(2,pixel_number), dtype= np.float32)
+    for pixel in tqdm(range(pixel_number), desc="target estimate") :
+        estimated_target_matrix[:,pixel], _ = nnls(A=linear_coef_matrix, b= corrected_signal[:,pixel])
+
 
     return estimated_target_matrix
+
+def _estimate_target_matrix(
+    Y : np.ndarray,
+    linear_coef_matrix : np.ndarray,
+    dark_current_matrix : np.ndarray,
+) :
+    image_number, pixel_number = Y.shape
+    Y_coor = Y-dark_current_matrix[:,None]
+    BtransposedY_coor = linear_coef_matrix.T @ Y_coor
+    
+    A = linear_coef_matrix.T @ linear_coef_matrix
+    A_inv = pinv(A)
+
+    C = A_inv @ BtransposedY_coor # unconstrained solution, we need to enforce non negativity.
+    assert C.shape == (2,pixel_number)
+    
+    positive_threshold = -1e-12
+    if (C > positive_threshold).all() : 
+        return C
+    else : # Then enforce non negativity that yields minimal residuals 
+
+        b1_transposedb1 = A[0,0]
+        b2_transposedb2 = A[1,1]
+
+        c1 = (linear_coef_matrix.T[0,:] @ Y_coor ) / b1_transposedb1 # solution for c2 = 0; shaped (1,pixel_number)
+        c2 = (linear_coef_matrix.T[1,:] @ Y_coor ) / b2_transposedb2 # solution for c1 = 0
+        c1[c1 <= positive_threshold] = 0
+        c2[c2 <= positive_threshold] = 0
+
+        c1 = c1.squeeze()
+        c2 = c2.squeeze()
+
+        must_enforce_nnegativity_mask = (C <= positive_threshold).any(axis=0)
+        matrix_indices = np.indices(C.shape)[1,0,:]
+
+        for pixel_idx in matrix_indices[must_enforce_nnegativity_mask] :
+            residual_c1 =cast(float,norm(c1[pixel_idx]*linear_coef_matrix[:,0] - Y_coor[:,pixel_idx])) 
+            residual_c2 =cast(float,norm(c2[pixel_idx]*linear_coef_matrix[:,1] - Y_coor[:,pixel_idx])) 
+            residual_0 = cast(float,norm(0 - Y_coor[:,pixel_idx]))
+            min_residual = np.argmin([residual_0, residual_c1, residual_c2,])
+
+            if min_residual == 0:
+                C[:,pixel_idx] = [0,0]
+            elif min_residual == 1 :
+                C[:,pixel_idx] = [c1[pixel_idx],0]
+            elif min_residual == 2 :
+                C[:, pixel_idx] =[0,c2[pixel_idx]]
+        
+        return C
+
+
 
 def _apply_gaussian_filter_on_target_matrix(
     target_matrix : np.ndarray,
@@ -243,11 +297,11 @@ def _apply_gaussian_filter_on_target_matrix(
 ) :
     assert target_matrix.shape[0] == 2, "target matrix should have only two component (signal_AF, signal_true)"
 
-    for image_idx in range(2) :
+    for image_idx,kernel in zip(range(2), [0.5,gaussian_kernel]) :
         flat_image = target_matrix[image_idx,:]
         smoothed_image = gaussian_filter(
             input= flat_image.reshape(image_shape),
-            sigma=gaussian_kernel
+            sigma=kernel
         )
         target_matrix[image_idx,:] = smoothed_image.flatten()
     
@@ -274,15 +328,20 @@ def _compute_error(
     delta = 1e-12
 ) :
     
-    error = norm(obj-obj_prev) / norm(obj_prev) + delta
+    error = norm(obj-obj_prev) / (norm(obj_prev) + delta)
     return error
+
+def compute_residuals() :
+    pass
 
 def _extract_resulting_signals(
     decomposed_signal_matrix : np.ndarray,
     shape : tuple[int],
     ) :
 
-    assert decomposed_signal_matrix.shape[0] == 0, "Unexpected shape for decomposed_signal : ".format(decomposed_signal_matrix.shape)
+    assert decomposed_signal_matrix.shape[0] == 2, "Unexpected shape for decomposed_signal : ".format(decomposed_signal_matrix.shape)
+
+    print('decomposed_signal_matrix, shape : ', decomposed_signal_matrix.shape)
 
     signal = decomposed_signal_matrix[0,:].reshape(shape)
     autofluorescence = decomposed_signal_matrix[1,:].reshape(shape)
