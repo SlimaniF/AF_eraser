@@ -67,7 +67,7 @@ def remove_autofluorescence_NMF(
         raise TypeError("Wrong type for images. Expected list or ndarray got {}".format(type(images)))
     
     if isinstance(exposure_time, list) :
-        if not all([isinstance(im,int) for im in images]) : raise TypeError("All list element must be ints.")
+        if not all([isinstance(time,int) for time in exposure_time]) : raise TypeError("All list element must be ints.")
     elif isinstance(exposure_time, int) :
         exposure_time = [exposure_time]*len(images)
     else :
@@ -159,9 +159,8 @@ def _initialize_matrix(
         observed_matrix,
     )
 
-    init_background = observed_matrix[1,:]
-    init_signal = images[0].flatten() - init_background
-    init_signal[init_signal < 0] = 0
+    init_background = observed_matrix[1:,:].mean(axis=0)
+    init_signal = observed_matrix[0]
 
     init_background = init_background.astype(np.float32)
     init_signal = init_signal.astype(np.float32)
@@ -290,13 +289,13 @@ def _apply_gaussian_filter_on_target_matrix(
     gaussian_kernel : int | tuple[int],
     image_shape : tuple[int]
 ) :
-    assert target_matrix.shape[0] == 2, "target matrix should have only two component (signal_AF, signal_true)"
+    assert target_matrix.shape[0] == 2, "target matrix should have only two component (signal_true, signal af)"
 
-    for image_idx,kernel in zip(range(2), [0.5,gaussian_kernel]) :
+    for image_idx in range(2) :
         flat_image = target_matrix[image_idx,:]
         smoothed_image = gaussian_filter(
             input= flat_image.reshape(image_shape),
-            sigma=kernel
+            sigma=gaussian_kernel
         )
         target_matrix[image_idx,:] = smoothed_image.flatten()
     
@@ -323,6 +322,9 @@ def _compute_error(
     delta = 1e-12
 ) :
     
+    obj[np.isnan(obj)] = 0
+    obj_prev[np.isnan(obj_prev)] = 0
+
     error = norm(obj-obj_prev) / (norm(obj_prev) + delta)
     return error
 
