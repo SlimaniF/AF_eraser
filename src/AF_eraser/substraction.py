@@ -32,10 +32,12 @@ def _match_intensities(
     background_mark = int(mode(background.flatten()).mode)
     signal_mark = int(mode(signal.flatten()).mode)
     shift = background_mark - signal_mark
-    background -= shift
-    background[background<0] = 0
+    
+    res = np.subtract(background, shift, dtype=np.int64)    
+    res[res < 0] = 0
+    res = res.astype(background.dtype)
 
-    return background
+    return res
 
 def _fit_backgrounds(
     signal : np.ndarray,
@@ -65,7 +67,7 @@ def _substract_backgrounds(
     background : np.ndarray
 ) :
     mask = signal >= background
-    signal[mask] -= background
+    signal[mask] -= background[mask]
     signal[~mask] = 0
 
     return signal 
